@@ -51,7 +51,7 @@ use narwhal_network::metrics::MetricsMakeCallbackHandler;
 use narwhal_network::metrics::{NetworkConnectionMetrics, NetworkMetrics};
 use sui_archival::reader::ArchiveReaderBalancer;
 use sui_archival::writer::ArchiveWriter;
-use sui_config::node::{ConsensusProtocol, DBCheckpointConfig};
+use sui_config::node::{ConsensusProtocol, DBCheckpointConfig, SignatureMPCTiresias};
 use sui_config::node_config_metrics::NodeConfigMetrics;
 use sui_config::{ConsensusConfig, NodeConfig};
 use sui_core::authority::authority_per_epoch_store::AuthorityPerEpochStore;
@@ -1082,20 +1082,28 @@ impl SuiNode {
         )
         .await?;
 
-        let tiresias_public_parameters = epoch_store.protocol_config().signature_mpc_tiresias_public_parameters().unwrap();
+        let signature_mpc_tiresias = config.signature_mpc_tiresias();
 
-        let signature_mpc_tiresias = config.signature_mpc_tiresias().expect("signature_mpc_tiresias should be populated");
+        match signature_mpc_tiresias {
+            None => {}
+            Some(signature_mpc_tiresias) => {
+                let signature_mpc_tiresias = signature_mpc_tiresias.signature_mpc_tiresias();
+                match signature_mpc_tiresias {
+                    Err(_) => {}
+                    Ok(signature_mpc_tiresias) => {
+                        let signature_mpc_tiresias_base64 = Base64::encode(&bcs::to_bytes(&signature_mpc_tiresias).unwrap());
+                        let protocol_public_key_base64 = config.protocol_public_key().encode_base64();
 
-        let signature_mpc_tiresias_base64 = Base64::encode(&bcs::to_bytes(&signature_mpc_tiresias).unwrap());
-        let protocol_public_key_base64 = config.protocol_public_key().encode_base64();
-
-        registry_service.default_registry()
-            .register(mysten_metrics::party_epoch_mpc_keys_metric(
-                &protocol_public_key_base64,
-                &signature_mpc_tiresias_base64,
-            ))
-            .unwrap();
-
+                        registry_service.default_registry()
+                            .register(mysten_metrics::party_epoch_mpc_keys_metric(
+                                &protocol_public_key_base64,
+                                &signature_mpc_tiresias_base64,
+                            ))
+                            .unwrap();
+                    }
+                }
+            }
+        }
 
         Self::start_epoch_specific_validator_components(
             config,
