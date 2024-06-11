@@ -40,7 +40,7 @@ use tiresias::{EncryptionKey};
 use twopc_mpc::paillier::PLAINTEXT_SPACE_SCALAR_LIMBS;
 pub use twopc_mpc::secp256k1::{SCALAR_LIMBS, GroupElement, Scalar};
 pub use twopc_mpc::secp256k1::paillier::bulletproofs::{
-    CentralizedPartyPresign, DecommitmentProofVerificationRoundParty, DKGCommitmentRoundParty, EncryptionOfSecretKeyShareRoundParty, PresignCommitmentRoundParty, ProtocolPublicParameters, SignatureHomomorphicEvaluationParty, SignatureNonceSharesCommitmentsAndBatchedProof, SignaturePartialDecryptionParty, SignatureThresholdDecryptionParty,  DKGCentralizedPartyOutput,
+    CentralizedPartyPresign, DecommitmentProofVerificationRoundParty, DKGCommitmentRoundParty, EncryptionOfSecretKeyShareRoundParty, PresignCommitmentRoundParty, ProtocolPublicParameters, SignatureHomomorphicEvaluationParty, SignatureNonceSharesCommitmentsAndBatchedProof, SignaturePartialDecryptionParty, SignaturePartialDecryptionProofParty, SignaturePartialDecryptionProofVerificationParty, SignatureThresholdDecryptionParty,  DKGCentralizedPartyOutput,
     PublicKeyShareDecommitmentAndProof, PublicNonceEncryptedPartialSignatureAndProof, SecretKeyShareEncryptionAndProof, DKGDecentralizedPartyOutput, DecentralizedPartyPresign, EncDHCommitment, EncDHCommitmentRoundParty,EncDHProofAggregationRoundParty, EncDHProofShareRoundParty, EncDLCommitment, EncDHDecommitment, EncDLDecommitment, EncDHProofShare, EncDLProofShare,
     EncDLCommitmentRoundParty,  EncDLDecommitmentRoundParty, EncryptedMaskedNoncesRoundParty, EncryptedMaskedKeyShareRoundParty, PresignDecentralizedPartyOutput,
     EncDLProofAggregationOutput, EncDLProofAggregationRoundParty,EncDLProofShareRoundParty, EncryptedMaskAndMaskedNonceShare, EncryptedNonceShareAndPublicShare, EncDHDecommitmentRoundParty, EncDHProofAggregationOutput, DKGDecommitmentRoundParty, DKGDecommitmentRoundState};
@@ -305,8 +305,11 @@ pub fn initiate_decentralized_party_sign(
     //session_id: SignatureMPCSessionID,
     dkg_output: DKGDecentralizedPartyOutput,
     presigns: Vec<DecentralizedPartyPresign>,
-) -> twopc_mpc::Result<Vec<SignaturePartialDecryptionParty<ProtocolContext>>> {
-    let protocol_public_parameters = ProtocolPublicParameters::new(*decryption_key_share_public_parameters.encryption_scheme_public_parameters.plaintext_space_public_parameters().modulus);
+    public_nonce_encrypted_partial_signature_and_proofs: Vec<PublicNonceEncryptedPartialSignatureAndProof<ProtocolContext>>,
+) -> twopc_mpc::Result<Vec<(SignaturePartialDecryptionParty<ProtocolContext>, SignaturePartialDecryptionProofParty)>> {
+
+    let encryption_scheme_public_parameters = decryption_key_share_public_parameters.encryption_scheme_public_parameters;
+    let protocol_public_parameters = ProtocolPublicParameters::new(*encryption_scheme_public_parameters.plaintext_space_public_parameters().modulus);
 
     let decryption_key_share = DecryptionKeyShare::new(
         party_id,
@@ -316,15 +319,28 @@ pub fn initiate_decentralized_party_sign(
 
     presigns
         .into_iter()
-        .map(|presign| {
-            SignaturePartialDecryptionParty::new(
-                decryption_key_share_public_parameters.threshold,
-                decryption_key_share.clone(),
-                decryption_key_share_public_parameters.clone(),
-                PhantomData,
-                protocol_public_parameters.clone(),
-                dkg_output.clone(),
-                presign,
+        .zip(public_nonce_encrypted_partial_signature_and_proofs)
+        .map(|(presign, public_nonce_encrypted_partial_signature_and_proof)| {
+            let designated_decrypting_party_id = 1; // TODO: figure out how this should be computed
+            (
+                SignaturePartialDecryptionParty::new(
+                    decryption_key_share_public_parameters.threshold,
+                    decryption_key_share.clone(),
+                    decryption_key_share_public_parameters.clone(),
+                    PhantomData,
+                    protocol_public_parameters.clone(),
+                    dkg_output.clone(),
+                    presign,
+                ),
+                SignaturePartialDecryptionProofParty::new(
+                    decryption_key_share_public_parameters.threshold,
+                    designated_decrypting_party_id,
+                    decryption_key_share,
+                    decryption_key_share_public_parameters,
+                    presign,
+                    encryption_scheme_public_parameters,
+                    public_nonce_encrypted_partial_signature_and_proof
+                )
             )
         })
         .collect()
@@ -365,8 +381,10 @@ pub fn decrypt_signature_decentralized_party_sign(
     messages: Vec<Vec<u8>>,
     decryption_key_share_public_parameters: DecryptionPublicParameters,
     decryption_shares: HashMap<PartyID, Vec<(PaillierModulusSizedNumber, PaillierModulusSizedNumber)>>,
+    signature_partial_decryption_proofs: HashMap<PartyID, Vec<DecryptionKeyShare::PartialDecryptionProof>>,
     public_nonce_encrypted_partial_signature_and_proofs: Vec<PublicNonceEncryptedPartialSignatureAndProof<ProtocolContext>>,
     signature_threshold_decryption_round_parties: Vec<SignatureThresholdDecryptionParty>,
+    signature_partial_decryption_proof_verification_round_parties: Vec<SignaturePartialDecryptionProofVerificationParty>
 ) -> twopc_mpc::Result<Vec<Vec<u8>>> {
     let protocol_public_parameters = ProtocolPublicParameters::new(*decryption_key_share_public_parameters.encryption_scheme_public_parameters.plaintext_space_public_parameters().modulus);
 
@@ -408,7 +426,12 @@ pub fn decrypt_signature_decentralized_party_sign(
         })
         .collect();
 
-    signature_threshold_decryption_round_parties.into_iter().zip(messages.into_iter().zip(public_nonce_encrypted_partial_signature_and_proofs.into_iter()).zip(decryption_shares.into_iter())).map(|(signature_threshold_decryption_round_party, ((message, public_nonce_encrypted_partial_signature_and_proof), (partial_signature_decryption_shares, masked_nonce_decryption_shares)))| {
+    let signatures = signature_threshold_decryption_round_parties.into_iter()
+        .zip(
+            messages.into_iter()
+            .zip(public_nonce_encrypted_partial_signature_and_proofs.into_iter())
+            .zip(decryption_shares.into_iter())
+        ).map(|(signature_threshold_decryption_round_party, ((message, public_nonce_encrypted_partial_signature_and_proof), (partial_signature_decryption_shares, masked_nonce_decryption_shares)))| {
 
         let (nonce_x_coordinate, signature_s) = signature_threshold_decryption_round_party.decrypt_signature(
             lagrange_coefficients.clone(),
@@ -420,7 +443,44 @@ pub fn decrypt_signature_decentralized_party_sign(
 
         Ok(Signature::<k256::Secp256k1>::from_scalars(k256::Scalar::from(nonce_x_coordinate), signature_s_inner).unwrap().to_vec())
     })
-        .collect()
+        .collect();
+
+    let malicious_parties = signature_partial_decryption_proof_verification_round_parties.into_iter()
+        .zip(
+            messages
+                .into_iter()
+                .zip(public_nonce_encrypted_partial_signature_and_proofs.into_iter())
+                .zip(decryption_shares.into_iter())
+        ).zip(signature_partial_decryption_proofs.into_iter())
+        .map(|(
+            (
+                signature_proof_verification_round_party, 
+                (
+                    (message, public_nonce_encrypted_partial_signature_and_proof), 
+                    (partial_signature_decryption_shares, masked_nonce_decryption_shares)
+                )
+            ), 
+            signature_partial_decryption_proofs
+        )| {
+
+        let errors = signature_proof_verification_round_party.identify_malicious_decrypters(
+            lagrange_coefficients.clone(),
+            partial_signature_decryption_shares,
+            masked_nonce_decryption_shares,
+            signature_partial_decryption_proofs,
+            &mut OsRng
+        )?;
+
+        // TODO: extract malicious IDs from errors
+        match errors {
+            Error::UnresponsiveParties(unresponsive_parties) => None,
+            Error::MaliciousDesignatedDecryptingParty(designated_decrypting_party_id) => None,
+            Error::InvalidParameters => None,
+        }
+    })
+    .collect();
+
+    signatures
 }
 
 pub fn message_digest(message: &[u8], hash: &Hash) -> secp256k1::Scalar {
