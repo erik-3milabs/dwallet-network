@@ -43,6 +43,8 @@ impl SignRound {
             party_id,
             parties.clone(),
             //session_id,
+            dkg_output,
+            presigns.clone(), 
             public_nonce_encrypted_partial_signature_and_proofs.clone(),
         )?;
 
